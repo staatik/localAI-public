@@ -1,0 +1,79 @@
+services:
+  # --- Reverse Proxy ---
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: litellm-gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /home/litellm/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /home/litellm/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - litellm
+    networks:
+      - frontend_net
+    restart: always
+
+
+  # --- LiteLLM Proxy + UI ---
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    environment:
+      # --- Core ---
+      # Master key for the proxy API - must start with sk-
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
+      # Salt key for encrypting stored provider API keys in the database
+      # WARNING: never change this after first run - all stored keys become unreadable
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY:?Set LITELLM_SALT_KEY in .env}
+
+      # --- Database (required for UI and persistent config) ---
+      - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/litellm
+
+      # --- UI ---
+      - UI_USERNAME=${UI_USERNAME:?Set UI_USERNAME in .env}
+      - UI_PASSWORD=${UI_PASSWORD:?Set UI_PASSWORD in .env}
+
+      # --- Store model config in DB instead of a file ---
+      # This is what allows you to manage models from the UI
+      - STORE_MODEL_IN_DB=True
+    depends_on:
+      - postgres
+    networks:
+      - frontend_net  # reachable by nginx
+      - backend_net   # can reach postgres
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+
+  # --- PostgreSQL ---
+  # Stores LiteLLM config: models, virtual keys, spend logs, teams
+  postgres:
+    image: postgres:16-alpine
+    container_name: litellm-postgres
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=litellm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend_net   # NOT reachable by nginx
+    restart: always
+
+
+networks:
+  frontend_net:
+    driver: bridge
+    # nginx <-> litellm
+  backend_net:
+    driver: bridge
+    internal: true  # no outbound internet - litellm <-> postgres only
+    # litellm <-> postgres
+
+volumes:
+  postgres_data:

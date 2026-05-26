@@ -1,0 +1,219 @@
+services:
+  # --- Reverse Proxy ---
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /home/openwebui/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /home/openwebui/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      openwebui:
+        condition: service_healthy
+      n8n:
+        condition: service_started
+      searxng:
+        condition: service_started
+    networks:
+      - frontend_net      # nginx only needs to reach app services, NOT qdrant or redis
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE  # required to bind ports 80 and 443
+    pids_limit: 100
+    mem_limit: 128M
+    cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- OpenWebUI ---
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:0.6.5
+    container_name: openwebui
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?Set WEBUI_SECRET_KEY in .env}
+
+      # Vector DB
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
+
+      # Web search
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+      - RAG_WEB_SEARCH_RESULT_COUNT=3
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=1
+
+      # Redis session/websocket state
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - openwebui_data:/app/backend/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - frontend_net  # reachable by nginx
+      - backend_net   # can reach qdrant and redis
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 1G
+    cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- n8n ---
+  n8n:
+    image: n8nio/n8n:1.88.0
+    container_name: n8n
+    volumes:
+      - n8n_data:/home/node/.n8n
+    environment:
+      - WEBHOOK_URL=https://n8n.home.lan/
+      - N8N_SECURE_COOKIE=false   # OK for internal-only; set true if exposed externally
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+    networks:
+      - frontend_net  # reachable by nginx only
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 512M
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Qdrant ---
+  qdrant:
+    image: qdrant/qdrant:v1.13.0
+    container_name: qdrant
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks:
+      - backend_net   # NOT reachable by nginx directly
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 1G
+    cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- SearXNG ---
+  searxng:
+    image: searxng/searxng:2025.4.19-0
+    container_name: searxng
+    volumes:
+      - /home/openwebui/searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=https://search.home.lan/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env}
+      - SEARXNG_VALKEY_URL=redis://redis:6379/0
+    networks:
+      - frontend_net  # reachable by nginx and openwebui
+      - backend_net   # can reach redis for rate limiting
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 100
+    mem_limit: 512M
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Redis ---
+  # No auth needed - Redis is on backend_net only, unreachable from nginx or the internet
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend_net   # NOT reachable by nginx directly
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 100
+    mem_limit: 256M
+    cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  frontend_net:
+    driver: bridge
+    # nginx <-> openwebui, n8n, searxng
+  backend_net:
+    driver: bridge
+    internal: true  # no outbound internet access - backend services only talk to each other
+    # openwebui, searxng <-> qdrant, redis
+
+volumes:
+  openwebui_data:
+  n8n_data:
+  qdrant_data:
+  redis_data:

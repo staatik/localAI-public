@@ -1,0 +1,43 @@
+use_default_settings: true
+
+general:
+  instance_name: "Local AI Search"
+  debug: false
+
+search:
+  safe_search: 0
+  autocomplete: "google"
+  default_lang: "en"
+
+server:
+  secret_key: ""
+  base_url: false
+  image_proxy: true
+  limiter: false
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  theme_args:
+    simple_style: dark
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+
+  - name: github
+    engine: github
+    shortcut: gh
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: ar
